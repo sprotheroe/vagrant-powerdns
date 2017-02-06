@@ -124,16 +124,14 @@ class PdnsRestApiClient
         {
           name: domain,
           type: "A",
+          ttl: 300,
+          changetype: "replace",
           records: [
             {
-              name: domain,
-              type: "A",
-              ttl: 300,
               disabled: false,
               content: ip
             }
-          ],
-          changetype: "replace"
+          ]
         }
       ]
     }
@@ -149,16 +147,14 @@ class PdnsRestApiClient
         {
           name: domain,
           type: "A",
+          ttl: 300,
+          changetype: "replace",
           records: [
             {
-              name: domain,
-              type: "A",
-              ttl: 300,
               content: ip,
               disabled: true
             }
-          ],
-          changetype: "replace"
+          ]
         }
       ]
     }

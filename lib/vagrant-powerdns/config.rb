@@ -4,12 +4,14 @@ module Vagrant
 
       attr_accessor :api_url
       attr_accessor :api_key
+      attr_accessor :cidr
       attr_accessor :default_zone
       attr_accessor :disable
 
       def initialize
         @api_url = UNSET_VALUE
         @api_key = UNSET_VALUE
+        @cidr = UNSET_VALUE
         @default_zone = UNSET_VALUE
         @disable = UNSET_VALUE
       end
@@ -24,6 +26,7 @@ module Vagrant
 
         @api_url = nil if @api_url == UNSET_VALUE
         @api_key = nil if @api_key == UNSET_VALUE
+        @cidr = nil if @cidr == UNSET_VALUE
         @disable = false if @disable == UNSET_VALUE
 
       end
@@ -52,6 +55,10 @@ module Vagrant
 
           # verify zone
           #begin @default_zone = Zone.new @default_zone; rescue => e; errors << "config.powerdns.default_zone: Invalid Zone #{@default_zone}. It should be like: `dev.example.com'" end
+
+          if @cidr == nil
+            errors << 'cidr not specified'
+          end
 
           return { 'PowerDNS configuration' => errors }
         end

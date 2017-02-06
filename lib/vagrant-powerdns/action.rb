@@ -1,146 +1,206 @@
+require 'netaddr'
+
 module Vagrant
   module Action
 
-    class Up
+    module Common
       def initialize(app, env)
         @app = app
         @machine = env[:machine]
         @zone = env[:machine].config.powerdns.default_zone
-        @host = env[:machine].config.vm.hostname.nil? ?
-          env[:machine].name.to_s : env[:machine].config.vm.hostname.to_s
-        @domain = @host.include?(@zone.name)? @host : @host + @zone.dotted
+        @host = determine_hostname(@machine)
 
-        # Identify who i am
+        # Identify who I am
         @myuser = Etc.getlogin.gsub(/\s+/, '')
         @myhost = Socket.gethostname
       end
 
-      def call(env)
-        if @machine.config.powerdns.enabled?
-          # assume default gateway address
-          @machine.communicate.sudo "ip route get to 8.8.8.8 | head -n 1" do |type,data|
-            stdout = data.chomp if type == :stdout
-            if !stdout.empty?
-              re = /src ([0-9\.]+)/
-              ip = stdout.match(re)[1]
-              zone = @zone.name
+      private
 
-              p = PdnsRestApiClient.new(env[:machine].config.powerdns.api_url,
-                                        env[:machine].config.powerdns.api_key)
+      def has_cidr?(env)
+        !!env[:machine].config.powerdns.cidr
+      end
 
-              # Only update if IP changed or inactive
-              record_not_found = p.zone(zone)["records"].select {|v| v["type"] == "A" and v["name"] == @domain and v["content"] == ip}.empty?
-              record_disabled = p.zone(zone)["records"].select { |v| v["type"] == "A" and v["name"] == @domain and v["disable"]}.empty?
+      def domain
+        @domain = @host.include?(@zone.name)? @host : @host + @zone.dotted
+      end
 
-              if record_not_found or record_disabled
-                env[:ui].info "PowerDNS action..."
-                # Append new comment
-                new_comment = {
-                  content: "#{@myuser} added this record from #{@myhost}",
-                  account: @myuser,
-                  name: @domain,
-                  type: "A"
-                }
-                comments = p.zone(zone)["comments"].delete_if { |v| v["name"] != @domain  }
-                comments << new_comment
+      def create_dns_entry(env)
+        hostname = determine_hostname(@machine)
+        fqdn = determine_fqdn(hostname)
+        all_ips = @machine.guest.capability(:get_ip_addresses)
+        ip = ip_to_bind(all_ips)
+        # add host record
+        canonical_fqdn = fqdn + '.'
+        add_host_record(env, canonical_fqdn, ip)
+        # configure resolver
+      end
 
-                ret = p.modify_domain(domain: @domain, ip: ip, zone_id: zone,
-                                      comments: comments)
+      def determine_hostname(machine)
+        hostname = machine.config.vm.hostname
+        if hostname.nil? || hostname.empty?
+          hostname = machine.guest.capability(:get_hostname)
+        end
+        hostname
+      end
 
-                # Check return
-                error = nil
-                if ret.is_a?(String)
-                  error = ret
-                else
-                  if ret.is_a?(Hash)
-                    error = ret.values[0] if ret.keys[0] == "error"
-                  else
-                    raise "Unknown esponse from PowerDNS API"
-                  end
-                end
-
-                # Display ui
-                if error.nil?
-                    env[:ui].detail "=> record #{@domain}(#{ip}) in zone #{zone} added !"
-                else
-                  env[:ui].detail "=> failed to add record #{@domain}(#{ip}) in zone #{zone}. Error was: #{error}"
-                end
-              end
-            end
-          end
-
-          @app.call(env)
+      def determine_fqdn(hostname)
+        hostname_parts = hostname.split('.')
+        if hostname_parts.size > 1
+          hostname.strip
+        else
+          domain_parts = @zone.name.split('.')
+          domain_parts.unshift(hostname)
+          cleaned_domain_parts = domain_parts.map(&:strip).reject { |p| p.empty? }
+          cleaned_domain_parts.join('.')
         end
       end
-    end
 
-
-    class Destroy
-      def initialize(app, env)
-        @app = app
-        @machine = env[:machine]
-        @zone = env[:machine].config.powerdns.default_zone
-        @host = env[:machine].config.vm.hostname.nil? ?
-          env[:machine].name.to_s : env[:machine].config.vm.hostname.to_s
-        @domain = @host.include?(@zone.name)? @host : @host + @zone.dotted
-
-        # Identify who i am
-        @myuser = Etc.getlogin.gsub(/\s+/, '')
-        @myhost = Socket.gethostname
+      def ip_to_bind(ips)
+         cidr = NetAddr::CIDR.create @machine.config.powerdns.cidr
+         ips.find { |ip| cidr.contains? ip }
       end
 
-      def call(env)
-        if @machine.config.powerdns.enabled?
-          p = PdnsRestApiClient.new(env[:machine].config.powerdns.api_url,
-                                    env[:machine].config.powerdns.api_key)
+      def powerdns_client
+        #config = env[:machine].config.powerdns
+        config = @machine.config.powerdns
+        PdnsRestApiClient.new(config.api_url, config.api_key)
+      end
 
+      def get_default_ip
+        ip = nil
+        # assume default gateway address
+        @machine.communicate.sudo "ip route get to 8.8.8.8 | head -n 1" do |type,data|
+          stdout = data.chomp if type == :stdout
+          if !stdout.empty?
+            re = /src ([0-9\.]+)/
+            ip = stdout.match(re)[1]
+          end
+        end
+        ip
+      end
+
+      def check_return(ret)
+        error = nil
+        if ret.is_a?(String)
+          error = ret
+        else
+          if ret.is_a?(Hash)
+            error = ret.values[0] if ret.keys[0] == "error"
+          else
+            raise "Unknown response from PowerDNS API"
+          end
+        end
+        error
+      end
+
+      def get_A_record(p, zone, fqdn)
+        # NOTE - this implementation assumes there is only one
+        # matching resource record
+        rrset = p.zone(zone)['rrsets']
+        recs = rrset.select do |rec|
+          rec['type'] == 'A' && rec['name'] == fqdn
+        end
+        recs.first
+      end
+
+      def add_host_record(env, fqdn, ip)
+        zone = @zone.name
+        p = powerdns_client
+
+        # Only update if IP changed or inactive
+        rec = get_A_record(p, zone, fqdn)
+        record_not_found = rec.nil? || rec["records"].select {|r| r["content"] == fqdn }.empty?
+        record_disabled = rec && rec["records"].find { |r| r["disabled"] }
+
+        if record_not_found or record_disabled
+          env[:ui].info "PowerDNS action..."
+          # Append new comment
+          new_comment = {
+            content: "#{@myuser} added this record from #{@myhost}",
+            account: @myuser,
+          }
+          comments = [ new_comment ]
+
+          ret = p.modify_domain(domain: fqdn, ip: ip, zone_id: zone, comments: comments)
+          error = check_return(ret)
+
+          # Display ui
+          if error.nil?
+              env[:ui].detail "=> record #{fqdn}(#{ip}) in zone #{zone} added !"
+          else
+            env[:ui].detail "=> failed to add record #{fqdn}(#{ip}) in zone #{zone}. Error was: #{error}"
+          end
+        end
+      end
+
+      def disable_host_record(env, fqdn)
+          p = powerdns_client
           zone = @zone.name
+
+          rec = get_A_record(p, zone, fqdn)
+
           # Get A record
-          record = p.zone(zone)["records"].find {|v| v["name"] == @domain}
+          record = rec["records"].first
           # Get comments for this domain
-          comments = p.zone(zone)["comments"].select {|v| v["name"] == @domain}
+          comments = rec["comments"]
 
           # only disable if active
-          if !record.nil? and not record["disabled"]
+          if record && !record["disabled"]
             env[:ui].info "PowerDNS action..."
 
             # Prepare comment to be appended
             new_comment = {
               content: "#{@myuser} disabled this record from #{@myhost}",
               account: @myuser,
-              name: @domain,
-              type: "A"
             }
             comments << new_comment
 
             # Get the old IP
             ip = record["content"]
 
-            ret = p.disable_domain(domain: @domain, ip: ip, zone_id: zone,
+            ret = p.disable_domain(domain: fqdn, ip: ip, zone_id: zone,
                                    comments: comments)
 
-            # Check return
-            error = nil
-            if ret.is_a?(String)
-              error = ret
-            else
-              if ret.is_a?(Hash)
-                error = ret.values[0] if ret.keys[0] == "error"
-              else
-                raise "Unknown esponse from PowerDNS API"
-              end
-            end
+            error = check_return(ret)
 
             # Display ui
             if error.nil?
-                env[:ui].detail "=> record #{@domain}(#{ip}) in zone #{zone} disabled !"
+                env[:ui].detail "=> record #{fqdn}(#{ip}) in zone #{zone} disabled !"
             else
-              env[:ui].detail "=> failed to disab;e record #{@domain} in zone #{zone}. Error was: #{error}"
+              env[:ui].detail "=> failed to disable record #{fqdn} in zone #{zone}. Error was: #{error}"
             end
           end
+      end
+    end
 
-          @app.call(env)
+    class Up
+      include Common
+
+      def call(env)
+        @app.call(env)
+        if @machine.config.powerdns.enabled?
+          if has_cidr?(env)
+            create_dns_entry(env)
+          else
+            ip = get_default_ip
+            add_host_record(env, domain, ip)
+          end
         end
+      end
+    end
+
+
+    class Destroy
+      include Common
+
+      def call(env)
+        if @machine.config.powerdns.enabled?
+          hostname = determine_hostname(@machine)
+          fqdn = determine_fqdn(hostname)
+          disable_host_record(env, fqdn+'.')
+        end
+        @app.call(env)
       end
     end
 

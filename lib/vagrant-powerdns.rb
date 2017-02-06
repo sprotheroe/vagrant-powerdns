@@ -26,12 +26,22 @@ module Vagrant
       require util_path.join("pdns_api")
       require lib_path.join("action")
 
+      guest_capability('linux','get_hostname') do
+        require lib_path.join('cap/linux/get_hostname')
+        Cap::Linux::GetHostname
+      end
+
+      guest_capability('linux','get_ip_addresses') do
+        require lib_path.join('cap/linux/get_ip_addresses')
+        Cap::Linux::GetIpAddresses
+      end
+
       action_hook(:powerdns, :machine_action_up) do |hook|
-        hook.append(Vagrant::Action::Up)
+        hook.prepend(Vagrant::Action::Up)
       end
 
       action_hook(:powerdns, :machine_action_destroy) do |hook|
-        hook.append(Vagrant::Action::Destroy)
+        hook.prepend(Vagrant::Action::Destroy)
       end
 
       autoload :Errors, lib_path.join("errors")
