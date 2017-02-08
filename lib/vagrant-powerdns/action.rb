@@ -127,6 +127,7 @@ module Vagrant
 
           # Display ui
           if error.nil?
+              configure_resolver
               env[:ui].detail "=> record #{fqdn}(#{ip}) in zone #{zone} added !"
           else
             env[:ui].detail "=> failed to add record #{fqdn}(#{ip}) in zone #{zone}. Error was: #{error}"
@@ -135,43 +136,70 @@ module Vagrant
       end
 
       def disable_host_record(env, fqdn)
-          p = powerdns_client
-          zone = @zone.name
+        p = powerdns_client
+        zone = @zone.name
 
-          rec = get_A_record(p, zone, fqdn)
+        rec = get_A_record(p, zone, fqdn)
 
-          # Get A record
-          record = rec["records"].first
-          # Get comments for this domain
-          comments = rec["comments"]
+        # Get A record
+        record = rec["records"].first
+        # Get comments for this domain
+        comments = rec["comments"]
 
-          # only disable if active
-          if record && !record["disabled"]
-            env[:ui].info "PowerDNS action..."
+        # only disable if active
+        if record && !record["disabled"]
+          env[:ui].info "PowerDNS action..."
 
-            # Prepare comment to be appended
-            new_comment = {
-              content: "#{@myuser} disabled this record from #{@myhost}",
-              account: @myuser,
-            }
-            comments << new_comment
+          # Prepare comment to be appended
+          new_comment = {
+            content: "#{@myuser} disabled this record from #{@myhost}",
+            account: @myuser,
+          }
+          comments << new_comment
 
-            # Get the old IP
-            ip = record["content"]
+          # Get the old IP
+          ip = record["content"]
 
-            ret = p.disable_domain(domain: fqdn, ip: ip, zone_id: zone,
-                                   comments: comments)
+          ret = p.disable_domain(domain: fqdn, ip: ip, zone_id: zone,
+                                 comments: comments)
 
-            error = check_return(ret)
+          error = check_return(ret)
 
-            # Display ui
-            if error.nil?
-                env[:ui].detail "=> record #{fqdn}(#{ip}) in zone #{zone} disabled !"
-            else
-              env[:ui].detail "=> failed to disable record #{fqdn} in zone #{zone}. Error was: #{error}"
-            end
+          # Display ui
+          if error.nil?
+              env[:ui].detail "=> record #{fqdn}(#{ip}) in zone #{zone} disabled !"
+          else
+            env[:ui].detail "=> failed to disable record #{fqdn} in zone #{zone}. Error was: #{error}"
           end
+        end
       end
+
+      def configure_resolver
+        script = <<-SCRIPT.gsub(/^ {8}/, '')
+        #!/bin/bash
+        line='nameserver #{@machine.config.powerdns.dns_server_ip}'
+        file=/etc/resolvconf/resolv.conf.d/head
+        if ! grep -q -e "'$line'" $file; then 
+          echo $line >> $file
+          resolvconf -u
+        fi
+        SCRIPT
+
+        scriptfile = Tempfile.new('vagrant-unbound-configure-resolver', binmode: true)
+        begin
+          scriptfile.write(script)
+          scriptfile.close
+          @machine.communicate.tap do |comm|
+            remote_script = "/tmp/configure-resolver"
+            comm.upload(scriptfile.path, remote_script)
+            comm.sudo("chmod +x #{remote_script}; #{remote_script}")
+            #comm.sudo("chmod +x #{remote_script}; #{remote_script}; rm #{remote_script}")
+          end
+        ensure
+          scriptfile.unlink
+        end
+      end
+
     end
 
     class Up

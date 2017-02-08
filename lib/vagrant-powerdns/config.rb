@@ -1,3 +1,5 @@
+require 'uri'
+
 module Vagrant
   module PowerDNS
     class Config < Vagrant.plugin("2", :config)
@@ -7,6 +9,7 @@ module Vagrant
       attr_accessor :cidr
       attr_accessor :default_zone
       attr_accessor :disable
+      attr_accessor :dns_server_ip 
 
       def initialize
         @api_url = UNSET_VALUE
@@ -14,6 +17,7 @@ module Vagrant
         @cidr = UNSET_VALUE
         @default_zone = UNSET_VALUE
         @disable = UNSET_VALUE
+        @dns_server_ip = UNSET_VALUE
       end
 
       def finalize!
@@ -29,6 +33,10 @@ module Vagrant
         @cidr = nil if @cidr == UNSET_VALUE
         @disable = false if @disable == UNSET_VALUE
 
+        if @dns_server_ip == UNSET_VALUE
+          uri = URI.parse(@api_url)
+          @dns_server_ip = uri.host
+        end
       end
 
       def enabled?
