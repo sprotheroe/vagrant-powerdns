@@ -33,7 +33,7 @@ module Vagrant
         @cidr = nil if @cidr == UNSET_VALUE
         @disable = false if @disable == UNSET_VALUE
 
-        if @dns_server_ip == UNSET_VALUE
+        if @dns_server_ip == UNSET_VALUE && @api_url
           uri = URI.parse(@api_url)
           @dns_server_ip = uri.host
         end
