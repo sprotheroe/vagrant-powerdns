@@ -87,7 +87,11 @@ module Vagrant
         else
           if ret.is_a?(Hash)
             error = ret.values[0] if ret.keys[0] == "error"
+          elsif ret.code == 204
+            # no action here
+            error = nil
           else
+            puts ret.inspect
             raise "Unknown response from PowerDNS API"
           end
         end
